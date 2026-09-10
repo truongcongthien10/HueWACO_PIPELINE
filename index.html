@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hệ Thống Quản Lý & Phân Tích Đường Ống Cấp Nước</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        body { display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Sidebar Control Panel */
+        #sidebar {
+            width: 360px;
+            background: #f8f9fa;
+            border-right: 1px solid #ccc;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            overflow-y: auto;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+        
+        h2 { font-size: 18px; color: #0056b3; margin-bottom: 5px; }
+        .filter-group { background: #fff; padding: 12px; border-radius: 6px; border: 1px solid #ddd; }
+        .filter-group label { font-size: 13px; font-weight: bold; display: block; margin-bottom: 5px; color: #333; }
+        select, input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; margin-bottom: 8px; }
+        
+        /* Statistics Card */
+        .stat-card {
+            background: #e9ecef;
+            padding: 10px;
+            border-radius: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 5px;
+        }
+        .stat-val { font-size: 16px; font-weight: bold; color: #28a745; }
+        
+        /* Map Container */
+        #map { flex: 1; height: 100%; }
+        
+        /* Legend */
+        .legend {
+            background: white;
+            padding: 10px;
+            line-height: 18px;
+            color: #333;
+            border-radius: 5px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            font-size: 12px;
+        }
+        .legend i { width: 18px; height: 18px; float: left; margin-right: 8px; opacity: 0.8; }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar Control Panel -->
+    <div id="sidebar">
+        <h2>🚰 Quản Lý Đường Ống Cấp Nước</h2>
+        
+        <!-- File Loader -->
+        <div class="filter-group">
+            <label>📂 Tải file GeoJSON của bạn:</label>
+            <input type="file" id="geojson-file" accept=".geojson, .json">
+        </div>
+
+        <!-- Tra cứu & Tìm kiếm -->
+        <div class="filter-group">
+            <label>🔍 Tìm kiếm theo Mã ống / Tên đường:</label>
+            <input type="text" id="search-input" placeholder="Nhập từ khóa...">
+        </div>
+
+        <!-- Bộ lọc -->
+        <div class="filter-group">
+            <label>🛠️ Lọc theo Chất liệu:</label>
+            <select id="material-filter">
+                <option value="ALL">-- Tất cả vật liệu --</option>
+            </select>
+
+            <label>📏 Lọc theo Đường kính (DN - mm):</label>
+            <select id="diameter-filter">
+                <option value="ALL">-- Tất cả kích thước --</option>
+            </select>
+        </div>
+
+        <!-- Tổng hợp Thống kê -->
+        <div class="filter-group">
+            <label>📊 Thống kê mạng lưới (Sau khi lọc):</label>
+            <div class="stat-card">
+                <span>Tổng số đoạn ống:</span>
+                <span id="stat-count" class="stat-val">0</span>
+            </div>
+            <div class="stat-card">
+                <span>Tổng chiều dài:</span>
+                <span id="stat-length" class="stat-val">0 m</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Map Area -->
+    <div id="map"></div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        // 1. Khởi tạo Bản đồ Leaflet
+        const map = L.map('map').setView([10.7769, 106.7009], 14); // Mặc định trung tâm TPHCM
+
+        // 2. TÍCH HỢP CÁC LỚP BẢN ĐỒ NỀN GOOGLE MAPS
+        const googleStreets = L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+            maxZoom: 20, subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+            attribution: '&copy; Google Maps'
+        });
+
+        const googleSatellite = L.tileLayer('https://{s}.google.com/vt/lyrs=s,h&x={x}&y={y}&z={z}', {
+            maxZoom: 20, subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+            attribution: '&copy; Google Maps'
+        });
+
+        const openStreetMap = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19, attribution: '&copy; OpenStreetMap'
+        });
+
+        // Bật bản đồ Google Hybrid (Vệ tinh + Tên đường) mặc định
+        googleSatellite.addTo(map);
+
+        // Bảng chuyển đổi Layer nền trên góc phải
+        const baseMaps = {
+            "Google Vệ tinh (Hybrid)": googleSatellite,
+            "Google Đường phố": googleStreets,
+            "OpenStreetMap": openStreetMap
+        };
+        L.control.layers(baseMaps).addTo(map);
+
+        // 3. DỮ LIỆU MẪU (Mock GeoJSON - Bạn có thể nạp file trực tiếp bằng giao diện)
+        let sampleGeoJSON = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": { "Ma_Ong": "ONG-01", "Chat_Lieu": "HDPE", "Duong_Kinh": 110, "Chieu_Dai": 150.5, "Ten_Duong": "Lê Lợi" },
+                    "geometry": { "type": "LineString", "coordinates": [[106.698, 10.775], [106.701, 10.777]] }
+                },
+                {
+                    "type": "Feature",
+                    "properties": { "Ma_Ong": "ONG-02", "Chat_Lieu": "uPVC", "Duong_Kinh": 90, "Chieu_Dai": 82.0, "Ten_Duong": "Nguyễn Huệ" },
+                    "geometry": { "type": "LineString", "coordinates": [[106.701, 10.777], [106.704, 10.774]] }
+                },
+                {
+                    "type": "Feature",
+                    "properties": { "Ma_Ong": "ONG-03", "Chat_Lieu": "Gang", "Duong_Kinh": 200, "Chieu_Dai": 310.0, "Ten_Duong": "Ham Nghi" },
+                    "geometry": { "type": "LineString", "coordinates": [[106.698, 10.775], [106.702, 10.771]] }
+                }
+            ]
+        };
+
+        let currentData = sampleGeoJSON;
+        let geojsonLayer;
+
+        // Quy định màu sắc theo Chất liệu đường ống
+        function getColor(material) {
+            switch(material) {
+                case 'HDPE': return '#007bff'; // Xanh dương
+                case 'uPVC': return '#28a745'; // Xanh lá
+                case 'Gang': return '#dc3545'; // Đỏ
+                default: return '#6c757d';     // Xám
+            }
+        }
+
+        // 4. Hàm vẽ mạng lưới đường ống lên bản đồ
+        function renderMap(data) {
+            if (geojsonLayer) { map.removeLayer(geojsonLayer); }
+
+            let totalLength = 0;
+            let count = 0;
+
+            geojsonLayer = L.geoJSON(data, {
+                style: function(feature) {
+                    return {
+                        color: getColor(feature.properties.Chat_Lieu),
+                        weight: Math.max(2, feature.properties.Duong_Kinh / 30), // Độ dày tuyến theo đường kính
+                        opacity: 0.9
+                    };
+                },
+                onEachFeature: function(feature, layer) {
+                    const props = feature.properties;
+                    // Bảng Popup hiện thông tin khi click vào đường ống
+                    const popupContent = `
+                        <div style="font-size:13px;">
+                            <b style="color:#0056b3;">Mã ống: ${props.Ma_Ong || 'N/A'}</b><br>
+                            <b>Tên đường:</b> ${props.Ten_Duong || 'N/A'}<br>
+                            <b>Chất liệu:</b> ${props.Chat_Lieu || 'N/A'}<br>
+                            <b>Đường kính (DN):</b> ${props.Duong_Kinh || 0} mm<br>
+                            <b>Chiều dài:</b> ${props.Chieu_Dai || 0} m
+                        </div>
+                    `;
+                    layer.bindPopup(popupContent);
+
+                    // Thống kê
+                    totalLength += parseFloat(props.Chieu_Dai || 0);
+                    count++;
+                }
+            }).addTo(map);
+
+            // Thống kê cập nhật ra giao diện
+            document.getElementById('stat-count').innerText = count;
+            document.getElementById('stat-length').innerText = totalLength.toFixed(1) + " m";
+
+            if (count > 0 && data.features.length > 0) {
+                map.fitBounds(geojsonLayer.getBounds());
+            }
+        }
+
+        // 5. Khởi tạo danh sách Lọc động
+        function initFilters(data) {
+            const matSelect = document.getElementById('material-filter');
+            const diaSelect = document.getElementById('diameter-filter');
+
+            const materials = [...new Set(data.features.map(f => f.properties.Chat_Lieu).filter(Boolean))];
+            const diameters = [...new Set(data.features.map(f => f.properties.Duong_Kinh).filter(Boolean))].sort((a,b)=>a-b);
+
+            matSelect.innerHTML = '<option value="ALL">-- Tất cả vật liệu --</option>';
+            materials.forEach(m => matSelect.innerHTML += `<option value="${m}">${m}</option>`);
+
+            diaSelect.innerHTML = '<option value="ALL">-- Tất cả kích thước --</option>';
+            diameters.forEach(d => diaSelect.innerHTML += `<option value="${d}">${d} mm</option>`);
+        }
+
+        // 6. Xử lý Lọc & Tìm kiếm
+        function filterData() {
+            const searchKw = document.getElementById('search-input').value.toLowerCase();
+            const matVal = document.getElementById('material-filter').value;
+            const diaVal = document.getElementById('diameter-filter').value;
+
+            const filteredFeatures = currentData.features.filter(f => {
+                const props = f.properties;
+                const matchSearch = (props.Ma_Ong && props.Ma_Ong.toLowerCase().includes(searchKw)) || 
+                                    (props.Ten_Duong && props.Ten_Duong.toLowerCase().includes(searchKw));
+                const matchMat = (matVal === 'ALL') || (props.Chat_Lieu === matVal);
+                const matchDia = (diaVal === 'ALL') || (props.Duong_Kinh == diaVal);
+
+                return matchSearch && matchMat && matchDia;
+            });
+
+            renderMap({ "type": "FeatureCollection", "features": filteredFeatures });
+        }
+
+        // Đăng ký sự kiện Lọc
+        document.getElementById('search-input').addEventListener('input', filterData);
+        document.getElementById('material-filter').addEventListener('change', filterData);
+        document.getElementById('diameter-filter').addEventListener('change', filterData);
+
+        // 7. Xử lý nạp File GeoJSON từ máy tính
+        document.getElementById('geojson-file').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                try {
+                    currentData = JSON.parse(evt.target.result);
+                    initFilters(currentData);
+                    renderMap(currentData);
+                } catch (err) {
+                    alert("Tệp không đúng định dạng GeoJSON chuẩn!");
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        // Chạy lần đầu với dữ liệu mẫu
+        initFilters(sampleGeoJSON);
+        renderMap(sampleGeoJSON);
+    </script>
+</body>
+</html>
