@@ -8,6 +8,10 @@
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     
+    <!-- Thư viện chuyển đổi hệ tọa độ VN2000 sang WGS84 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+    <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+    
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
         body { display: flex; height: 100vh; overflow: hidden; }
@@ -53,7 +57,7 @@
         <div class="filter-group">
             <label>📂 Tải file GeoJSON:</label>
             <input type="file" id="geojson-file" accept=".geojson, .json">
-            <div id="loading">⏳ Đang xử lý dữ liệu lớn, vui lòng đợi...</div>
+            <div id="loading">⏳ Đang xử lý & chuyển đổi tọa độ, vui lòng đợi...</div>
         </div>
 
         <div class="filter-group">
@@ -91,7 +95,10 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     
     <script>
-        // 1. Khởi tạo Bản đồ Leaflet (Trung tâm Thừa Thiên Huế)
+        // 1. Khai báo hệ tọa độ VN-2000 Thừa Thiên Huế (KTT 107.5)
+        proj4.defs("VN2000_HUE", "+proj=tmerc +lat_0=0 +lon_0=107.5 +k=0.9999 +x_0=500000 +y_0=0 +ellps=WGS84 +towgs84=-191.9044,-39.3032,-111.4503,0.00928836,0.01975479,-0.00427372,0.252906278 +units=m +no_defs");
+
+        // 2. Khởi tạo Bản đồ Leaflet (Trung tâm Thừa Thiên Huế)
         const map = L.map('map').setView([16.4637, 107.5909], 13);
 
         const googleSatellite = L.tileLayer('https://{s}.google.com/vt/lyrs=s,h&x={x}&y={y}&z={z}', {
@@ -108,7 +115,35 @@
         let currentData = null;
         let geojsonLayer = null;
 
-        // 2. Hàm đọc giá trị thuộc tính linh hoạt (Tránh lỗi khác tên cột)
+        // 3. Hàm kiểm tra và tự động chuyển đổi tọa độ VN-2000 -> WGS84
+        function transformGeoJSON(data) {
+            if (!data.features || data.features.length === 0) return data;
+            
+            // Lấy thử tọa độ điểm đầu tiên để kiểm tra
+            let sample = data.features[0].geometry.coordinates;
+            while (Array.isArray(sample[0])) { sample = sample[0]; }
+            
+            // Nếu tọa độ dạng Mét (VN-2000) chứ không phải Độ (WGS84)
+            if (sample && sample[0] > 1000) {
+                data.features.forEach(f => {
+                    if (f.geometry && f.geometry.coordinates) {
+                        f.geometry.coordinates = convertCoords(f.geometry.coordinates);
+                    }
+                });
+            }
+            return data;
+        }
+
+        function convertCoords(coords) {
+            if (typeof coords[0] === 'number') {
+                // Chuyển VN2000 (x, y) -> WGS84 (kinh độ, vĩ độ)
+                let converted = proj4("VN2000_HUE", "WGS84", [coords[0], coords[1]]);
+                return [converted[0], converted[1]];
+            }
+            return coords.map(convertCoords);
+        }
+
+        // 4. Các hàm đọc thuộc tính linh hoạt
         function getPropValue(props, keys) {
             if (!props) return null;
             for (let k of Object.keys(props)) {
@@ -148,7 +183,7 @@
             return '#6c757d';
         }
 
-        // 3. Hiển thị dữ liệu lên bản đồ
+        // 5. Hiển thị dữ liệu lên bản đồ
         function renderMap(data) {
             if (geojsonLayer) { map.removeLayer(geojsonLayer); }
 
@@ -198,7 +233,7 @@
             }
         }
 
-        // 4. Tạo bộ lọc
+        // 6. Tạo bộ lọc
         function initFilters(data) {
             const matSelect = document.getElementById('material-filter');
             const diaSelect = document.getElementById('diameter-filter');
@@ -220,7 +255,7 @@
             Array.from(dias).sort((a,b)=>a-b).forEach(d => diaSelect.innerHTML += `<option value="${d}">${d} mm</option>`);
         }
 
-        // 5. Lọc dữ liệu
+        // 7. Lọc dữ liệu
         function filterData() {
             if (!currentData) return;
             const searchKw = document.getElementById('search-input').value.toLowerCase();
@@ -248,7 +283,7 @@
         document.getElementById('material-filter').addEventListener('change', filterData);
         document.getElementById('diameter-filter').addEventListener('change', filterData);
 
-        // 6. Đọc file GeoJSON người dùng tải lên
+        // 8. Đọc file GeoJSON người dùng tải lên
         document.getElementById('geojson-file').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file) return;
@@ -262,12 +297,12 @@
                     try {
                         let text = evt.target.result;
                         
-                        // Xóa các ký tự BOM nhiễu nếu có
                         if (text.charCodeAt(0) === 0xFEFF) {
                             text = text.substr(1);
                         }
 
-                        currentData = JSON.parse(text);
+                        // Đọc JSON và tự động chuyển đổi hệ tọa độ VN2000 -> WGS84
+                        currentData = transformGeoJSON(JSON.parse(text));
 
                         if (!currentData.type || currentData.type !== "FeatureCollection") {
                             throw new Error("File JSON không có cấu trúc FeatureCollection chuẩn.");
@@ -278,7 +313,7 @@
                         loading.style.display = 'none';
                     } catch (err) {
                         loading.style.display = 'none';
-                        alert("Lỗi đọc file: " + err.message + "\n\nHướng xử lý: Hãy kiểm tra xem file .geojson có bị hỏng cấu trúc cú pháp JSON hay không.");
+                        alert("Lỗi đọc file: " + err.message);
                     }
                 }, 50);
             };
